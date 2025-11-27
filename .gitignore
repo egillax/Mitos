@@ -1,0 +1,101 @@
+# Python caches & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / distribution
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+.conda/
+.mamba/
+.python-version
+
+# Testing / coverage / tooling caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.nox/
+.tox/
+.cache/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors & IDEs
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+.factorypath
+nbactions.xml
+nb-configuration.xml
+
+# R / RStudio
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Databases & large local artifacts
+*.duckdb
+*.duckdb.*
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+*.feather
+*.arrow
+
+# Logs, temp files, scratch dirs
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+tmp/
+temp/
+
+# Generated SQL / comparison helpers
+*-out.sql
+*-python.sql
+*-circe.sql
+
+# OS junk
+.DS_Store
+Thumbs.db
