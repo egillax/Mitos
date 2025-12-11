@@ -1,24 +1,37 @@
-#!/usr/bin/env python3
-
+#!/usr/bin/env python1
 from __future__ import annotations
 
 import argparse
 import os
 import re
-import subprocess
 import sys
+import subprocess
 import textwrap
 import time
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Any, Literal, Annotated
 
 import yaml
 import ibis
+from ibis.backends import BaseBackend
 
-from ibis_cohort.build_context import BuildContext, CohortBuildOptions, compile_codesets
-from ibis_cohort.builders.pipeline import build_primary_events
-from ibis_cohort.cohort_expression import CohortExpression
+from pydantic import (
+    BaseModel,
+    Field,
+    FilePath,
+    SecretStr,
+    ConfigDict,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
+from mitos.build_context import BuildContext, CohortBuildOptions, compile_codesets
+from mitos.builders.pipeline import build_primary_events
+from mitos.cohort_expression import CohortExpression
+
+
+IbisConnection = Any
 IBIS_TO_OHDSI_DIALECT = {
     "duckdb": "duckdb",
     "databricks": "spark",
@@ -29,106 +42,185 @@ IBIS_TO_OHDSI_DIALECT = {
     "mssql": "sql server",
 }
 
-ConfigPrimitive: TypeAlias = str | int | float | bool | None
-ConfigValue: TypeAlias = (
-    ConfigPrimitive | list["ConfigValue"] | dict[str, "ConfigValue"]
-)
-ConfigDict: TypeAlias = dict[str, ConfigValue]
+
+class BaseProfile(BaseModel):
+    """Shared settings for all backends (OHDSI specifics)."""
+
+    model_config = ConfigDict(extra="forbid")  # typo protection in YAML!
+
+    cdm_schema: str
+    vocab_schema: str | None = None
+    result_schema: str | None = None
+    temp_schema: str | None = None
+
+    json_path: FilePath = Field(default=Path("cohorts/6243-dementia-outcome-v1.json"))
+    cohort_table: str = "circe_cohort"
+    cohort_id: int = 1
+
+    capture_stages: bool = False
+    debug_prefix: str | None = None
+    python_sql_out: Path | None = None
+    circe_sql_out: Path | None = None
+    python_stage_dir: Path | None = None  # Not DirectoryPath (might not exist yet)
+
+    @model_validator(mode="after")
+    def set_defaults(self) -> "BaseProfile":
+        if self.vocab_schema is None:
+            self.vocab_schema = self.cdm_schema
+        if self.python_stage_dir or self.debug_prefix:
+            self.capture_stages = True
+        return self
+
+    def get_ibis_connection_params(self) -> dict[str, Any]:
+        """Subclasses must implement this to return ONLY what ibis.connect needs."""
+        raise NotImplementedError
 
 
-def load_config_with_env_vars(config_path: str, profile_name: str) -> ConfigDict:
+class DuckDBProfile(BaseProfile):
+    """Specific Validation for DuckDB Profiles."""
+
+    backend: Literal["duckdb"]
+
+    cdm_schema: str = "main"
+
+    database: str = ":memory:"
+    read_only: bool = False
+
+    def get_ibis_connection_params(self) -> dict[str, Any]:
+        return {"database": self.database, "read_only": self.read_only}
+
+
+class DatabricksProfile(BaseProfile):
+    """Specific Validation for Databricks Profiles."""
+
+    backend: Literal["databricks"]
+    model_config = ConfigDict(populate_by_name=True)
+    server_hostname: str = Field(alias="host")
+    http_path: str
+    access_token: SecretStr
+
+    def get_ibis_connection_params(self) -> dict[str, Any]:
+        return {
+            "server_hostname": self.server_hostname,
+            "http_path": self.http_path,
+            "access_token": self.access_token.get_secret_value(),
+        }
+
+
+AnyProfile = Annotated[
+    DuckDBProfile | DatabricksProfile, Field(discriminator="backend")
+]
+
+
+class ProfilesFile(BaseModel):
+    """Validates the entire profiles.yaml file structure."""
+
+    model_config = ConfigDict(extra="ignore")
+    default_profile: str | None = None
+    profiles: dict[str, AnyProfile]
+
+
+def load_yaml_with_env(config_path: str) -> dict[str, Any]:
+    """
+    Loads YAML, substitutes env vars, and transforms flat structure
+    into Pydantic-compatible structure.
+    """
     if not os.path.exists(config_path):
-        return {}
+        return {"profiles": {}}
 
     with open(config_path, "r") as f:
         try:
-            raw_config_obj = cast(
-                dict[str, ConfigValue] | list[ConfigValue] | None, yaml.safe_load(f)
-            )
-        except yaml.YAMLError as e:
-            raise RuntimeError(f"Error parsing YAML config: {e}") from e
+            raw_content = f.read()
+        except Exception as e:
+            raise RuntimeError(f"Error reading config: {e}")
 
-    if not isinstance(raw_config_obj, dict):
-        raise ValueError(f"Config root must be a mapping, got {type(raw_config_obj)}")
-    raw_mapping: dict[str, ConfigValue] = raw_config_obj
+    def sub(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        val = os.environ.get(var_name)
+        return val if val is not None else match.group(0)
 
-    if profile_name not in raw_mapping:
-        raise ValueError(f"Profile '{profile_name}' not found in {config_path}")
+    expanded_content = re.sub(r"\$\{([^}]+)\}", sub, raw_content)
 
-    profile_raw = raw_mapping[profile_name]
-    if not isinstance(profile_raw, dict):
-        raise ValueError(
-            f"Profile '{profile_name}' must be a mapping, got {type(profile_raw)}"
-        )
-    profile_config: ConfigDict = cast(ConfigDict, profile_raw)
-
-    def substitute_value(item: ConfigValue) -> ConfigValue:
-        if isinstance(item, dict):
-            return {k: substitute_value(v) for k, v in item.items()}
-        if isinstance(item, list):
-            return [substitute_value(i) for i in item]
-        if isinstance(item, str):
-            matches: list[str] = re.findall(r"\$\{([^}]+)\}", item)
-            for var_name in matches:
-                env_val = os.environ.get(var_name)
-                if env_val is None:
-                    raise ValueError(f"Missing environment variable: {var_name}")
-                item = item.replace(f"${{{var_name}}}", env_val)
-            return item
-        return item
-
-    substituted = substitute_value(profile_config)
-    return cast(ConfigDict, substituted)
-
-
-def get_connection(args: argparse.Namespace) -> ibis.BaseBackend:
-    config: ConfigDict = {}
-
-    if args.config and args.profile:
-        print(f"Loading profile '{args.profile}' from {args.config}...")
-        config = load_config_with_env_vars(args.config, args.profile)
-
-    if args.backend:
-        config["backend"] = args.backend
-
-    backend_value = config.pop("backend", "duckdb")
-    if not isinstance(backend_value, str):
-        raise ValueError(f"Backend must be a string, got {type(backend_value)}")
-    backend_name = backend_value
-
-    if backend_name == "duckdb" and args.cdm_db:
-        config["database"] = args.cdm_db
-
-    print(f"Connecting to backend: {backend_name}")
-
-    # try to import the backend entrypoint
     try:
-        entrypoint = getattr(ibis, backend_name)
-    except AttributeError:
-        raise ValueError(f"Ibis backend {backend_name} is not recognized.")
-    except ImportError as e:
+        data = yaml.safe_load(expanded_content)
+    except yaml.YAMLError as e:
+        raise RuntimeError(f"Invalid YAML syntax: {e}")
+
+    if not isinstance(data, dict):
+        return {"profiles": {}}
+
+    if "profiles" in data:
+        return data
+
+    default_profile = data.pop("default_profile", None)
+
+    return {"default_profile": default_profile, "profiles": data}
+
+
+def resolve_config(args: argparse.Namespace) -> AnyProfile:
+    raw_data = load_yaml_with_env(args.config)
+
+    try:
+        profiles_obj = ProfilesFile(**raw_data)
+    except ValidationError as e:
+        print(f"Error in {args.config}:", file=sys.stderr)
+        print(e, file=sys.stderr)
+        sys.exit(1)
+    profile_name = args.profile or profiles_obj.default_profile
+    if profile_name:
+        if profile_name not in profiles_obj.profiles:
+            print(
+                f"Profile '{args.profile}' not found in {args.config}", file=sys.stderr
+            )
+            sys.exit(1)
+        print(f"Using profile: {profile_name}")
+        active_config = profiles_obj.profiles[profile_name]
+
+        config_dict = active_config.model_dump(mode="json", by_alias=True)
+    else:
+        config_dict = {"backend": args.backend or "duckdb"}
+
+    meta_keys = {"config", "profile"}
+    cli_args = {
+        k: v for k, v in vars(args).items() if v is not None and k not in meta_keys
+    }
+
+    if cli_args.get("cdm_db"):
+        cli_args["database"] = cli_args.pop("cdm_db")
+
+    merged_data = {**config_dict, **cli_args}
+
+    try:
+        validator = TypeAdapter(AnyProfile)
+        final_config = validator.validate_python(merged_data)
+        return final_config
+    except ValidationError as e:
+        print("Configuration Error (CLI + YAML mismatch):", file=sys.stderr)
+        print(e, file=sys.stderr)
+        sys.exit(1)
+
+
+def get_connection(cfg: AnyProfile) -> BaseBackend:
+    print(f"Connecting to backend: {cfg.backend}")
+    try:
+        if not hasattr(ibis, cfg.backend):
+            raise ValueError(f"Backend '{cfg.backend}' not recognized.")
+        entrypoint = getattr(ibis, cfg.backend)
+    except (ImportError, ModuleNotFoundError) as e:
         raise ImportError(
-            f"Failed to import the '{backend_name}' backend. "
-            f"You likely need to install the driver.\n"
-            ""
-            f"Try running: pip install 'ibis-framework[{backend_name}]'"
+            f"Missing driver for {cfg.backend}. Run `uv add ibis-framework[{cfg.backend}]`"
         ) from e
 
     try:
-        con = entrypoint.connect(**config)
+        params = cfg.get_ibis_connection_params()
+        con = entrypoint.connect(**params)
         return con
     except Exception as e:
-        raise RuntimeError(f"Connection to {backend_name} failed: {e}") from e
+        raise RuntimeError(f"Connection failed: {e}") from e
 
 
 def get_ohdsi_dialect(con: ibis.BaseBackend) -> str:
-    name = con.name
-    if name not in IBIS_TO_OHDSI_DIALECT:
-        print(
-            f"Warning: Backend '{name}' not explicitly mapped. Defaulting to '{name}'."
-        )
-        return name
-    return IBIS_TO_OHDSI_DIALECT[name]
+    return IBIS_TO_OHDSI_DIALECT.get(con.name, con.name)
 
 
 def quote_ident(value: str) -> str:
@@ -139,10 +231,8 @@ def quote_ident(value: str) -> str:
 def qualify_identifier(name: str, schema: str | None) -> str:
     if not schema:
         return quote_ident(name)
-
     parts = schema.split(".")
     quoted_schema = ".".join(quote_ident(p) for p in parts)
-
     return f"{quoted_schema}.{quote_ident(name)}"
 
 
@@ -154,9 +244,7 @@ def wrap_count_query(sql: str) -> str:
 def _split_sql_statements(sql_script: str) -> list[str]:
     statements: list[str] = []
     current: list[str] = []
-    in_single = False
-    in_double = False
-    escape = False
+    in_single = in_double = escape = False
     for ch in sql_script:
         current.append(ch)
         if ch == "\\" and not escape:
@@ -167,36 +255,27 @@ def _split_sql_statements(sql_script: str) -> list[str]:
         elif ch == '"' and not in_single and not escape:
             in_double = not in_double
         elif ch == ";" and not in_single and not in_double:
-            statement = "".join(current).strip()
-            if statement:
-                statements.append(statement[:-1].strip())
+            if s := "".join(current).strip():
+                statements.append(s[:-1].strip())
             current = []
         escape = False
-    remainder = "".join(current).strip()
-    if remainder:
-        statements.append(remainder)
+    if s := "".join(current).strip():
+        statements.append(s)
     return statements
 
 
 def run_python_pipeline(
-    con: ibis.BaseBackend,
-    json_path: Path,
-    cdm_schema: str,
-    vocab_schema: str | None,
-    *,
-    capture_stages: bool = False,
-    debug_prefix: str | None = None,
+    con: IbisConnection,
+    cfg: AnyProfile,
 ) -> tuple[str, int, dict[str, float], list[dict]]:
-    expression = CohortExpression.model_validate_json(json_path.read_text())
-    schema = vocab_schema or cdm_schema
+    expression = CohortExpression.model_validate_json(cfg.json_path.read_text())
 
     options = CohortBuildOptions(
-        cdm_schema=cdm_schema,
-        vocabulary_schema=schema,
-        capture_sql=capture_stages,
+        cdm_schema=cfg.cdm_schema,
+        vocabulary_schema=cfg.vocab_schema,
+        capture_sql=cfg.capture_stages,
     )
 
-    # Phase 1: Compile Codesets
     compile_start = time.perf_counter()
     resource = compile_codesets(con, expression.concept_sets, options)
     codeset_exec_ms = (time.perf_counter() - compile_start) * 1000
@@ -205,37 +284,29 @@ def run_python_pipeline(
     stage_details: list[dict[str, object]] = []
 
     try:
-        # Phase 2: Build Events
         build_start = time.perf_counter()
         events = build_primary_events(expression, ctx)
         build_exec_ms = (time.perf_counter() - build_start) * 1000
 
         if events is None:
-            raise RuntimeError("Cohort expression did not produce any primary events.")
+            raise RuntimeError("Cohort expression produced no primary events.")
 
-        # Phase 3: Compile SQL
         compile_sql_start = time.perf_counter()
         sql = events.compile()
         compile_sql_ms = (time.perf_counter() - compile_sql_start) * 1000
 
-        # Phase 4: Final Execution (Count)
-        count_sql = wrap_count_query(sql)
+        count_sql = wrap_count_query(str(sql))
         count_start = time.perf_counter()
 
-        # --- POLARS FIX ---
-        # Execute query via Ibis and convert to Polars DataFrame
         pl_df = con.sql(count_sql).to_polars()
-        # Extract scalar using Polars item()
         count = int(pl_df.item(0, 0))
 
         final_exec_ms = (time.perf_counter() - count_start) * 1000
 
-        if capture_stages:
+        if cfg.capture_stages:
             for idx, (table_name, statement) in enumerate(ctx.captured_sql(), start=1):
-                # Generic count via Polars
                 c_df = con.sql(f"SELECT COUNT(*) FROM {table_name}").to_polars()
                 row_count = int(c_df.item(0, 0))
-
                 stage_details.append(
                     {
                         "index": idx,
@@ -245,22 +316,20 @@ def run_python_pipeline(
                     }
                 )
     finally:
-        if capture_stages and debug_prefix and stage_details:
+        if cfg.capture_stages and cfg.debug_prefix and stage_details:
             for stage in stage_details:
-                table_name = stage["table"]
-                safe_source = table_name.strip('"')
-                target_suffix = re.sub(r"[^A-Za-z0-9_]", "_", safe_source)
-                target_name = f"{debug_prefix}_{stage['index']:02d}_{target_suffix}"
-
+                safe_src = stage["table"].strip('"')
+                safe_suffix = re.sub(r"[^A-Za-z0-9_]", "_", safe_src)
+                target = f"{cfg.debug_prefix}_{stage['index']:02d}_{safe_suffix}"
                 try:
-                    ctas = f"CREATE TABLE {quote_ident(target_name)} AS SELECT * FROM {quote_ident(safe_source)}"
-                    con.raw_sql(ctas)
+                    con.raw_sql(
+                        f"CREATE TABLE {quote_ident(target)} AS SELECT * FROM {quote_ident(safe_src)}"
+                    )
                 except Exception as e:
                     print(
-                        f"Warning: Could not save debug table {target_name}: {e}",
+                        f"Warning: Failed to save debug table {target}: {e}",
                         file=sys.stderr,
                     )
-
         ctx.close()
 
     metrics = {
@@ -270,67 +339,40 @@ def run_python_pipeline(
         "final_exec_ms": final_exec_ms,
         "total_ms": codeset_exec_ms + build_exec_ms + compile_sql_ms + final_exec_ms,
     }
-    return sql, count, metrics, stage_details
+    return str(sql), count, metrics, stage_details
 
 
 def generate_circe_sql_via_r(
-    json_path: Path,
+    cfg: AnyProfile,
     target_dialect: str,
-    cdm_schema: str,
-    vocab_schema: str,
-    result_schema: str,
-    target_schema: str,
-    target_table: str,
-    cohort_id: int,
-    temp_schema: str,
 ) -> tuple[str, float]:
+    temp_arg = cfg.temp_schema or ""
+    target_schema_arg = cfg.result_schema or cfg.cdm_schema
+    result_schema_arg = cfg.result_schema or cfg.cdm_schema
+
     r_script = textwrap.dedent(
         """
-        suppressPackageStartupMessages({
-          library(CirceR)
-          library(SqlRender)
-        })
+        suppressPackageStartupMessages({library(CirceR); library(SqlRender)})
         args <- commandArgs(trailingOnly = TRUE)
-        if (length(args) != 9) {
-          stop("Expected 9 trailing arguments.")
-        }
-        json_path <- args[[1]]
-        cdm_schema <- args[[2]]
-        vocab_schema <- args[[3]]
-        result_schema <- args[[4]]
-        target_schema <- args[[5]]
-        target_table <- args[[6]]
-        cohort_id <- as.integer(args[[7]])
-        temp_schema <- args[[8]]
-        target_dialect <- args[[9]]
-
-        if (cdm_schema == "") stop("cdm_schema is required")
-        if (vocab_schema == "") vocab_schema <- cdm_schema
-        if (result_schema == "") result_schema <- cdm_schema
-        if (target_schema == "") target_schema <- result_schema
-        if (temp_schema == "") temp_schema <- target_schema
+        json_path <- args[[1]]; cdm_schema <- args[[2]]; vocab_schema <- args[[3]]
+        result_schema <- args[[4]]; target_schema <- args[[5]]; target_table <- args[[6]]
+        cohort_id <- as.integer(args[[7]]); temp_schema <- args[[8]]; target_dialect <- args[[9]]
 
         json_str <- paste(readLines(json_path, warn = FALSE), collapse = "\\n")
         expression <- CirceR::cohortExpressionFromJson(json_str)
         options <- CirceR::createGenerateOptions()
-        options$generateStats <- FALSE
-        options$useTempTables <- FALSE
-        options$tempEmulationSchema <- temp_schema
-        sql <- CirceR::buildCohortQuery(expression, options)
+        options$generateStats <- FALSE; options$useTempTables <- FALSE;
+        options$tempEmulationSchema <- if(temp_schema=="") NULL else temp_schema
         
-        sql <- SqlRender::render(
-          sql,
-          cdm_database_schema = cdm_schema,
-          vocabulary_database_schema = vocab_schema,
-          results_database_schema = result_schema,
-          target_database_schema = target_schema,
-          cohort_database_schema = target_schema,
-          target_cohort_table = target_table,
-          target_cohort_id = cohort_id,
-          tempEmulationSchema = temp_schema
-        )
-        sql <- SqlRender::translate(sql = sql, targetDialect = target_dialect)
-        cat(sql)
+        sql <- CirceR::buildCohortQuery(expression, options)
+        sql <- SqlRender::render(sql, cdm_database_schema=cdm_schema, 
+                                 vocabulary_database_schema=vocab_schema,
+                                 results_database_schema=result_schema,
+                                 target_database_schema=target_schema,
+                                 target_cohort_table=target_table,
+                                 target_cohort_id=cohort_id,
+                                 tempEmulationSchema=if(temp_schema=="") NULL else temp_schema)
+        cat(SqlRender::translate(sql=sql, targetDialect=target_dialect))
         """
     ).strip()
 
@@ -338,222 +380,154 @@ def generate_circe_sql_via_r(
         "Rscript",
         "-e",
         r_script,
-        str(json_path),
-        cdm_schema or "",
-        vocab_schema or "",
-        result_schema or "",
-        target_schema or "",
-        target_table,
-        str(cohort_id),
-        temp_schema or "",
+        str(cfg.json_path),
+        cfg.cdm_schema,
+        cfg.vocab_schema,
+        result_schema_arg,
+        target_schema_arg,
+        cfg.cohort_table,
+        str(cfg.cohort_id),
+        temp_arg,
         target_dialect,
     ]
+
     start = time.perf_counter()
     result = subprocess.run(cmd, capture_output=True, text=True)
-    elapsed_ms = (time.perf_counter() - start) * 1000
+    elapsed = (time.perf_counter() - start) * 1000
     if result.returncode != 0:
-        raise RuntimeError(
-            "Circe SQL generation failed:\n"
-            f"{result.stderr.strip() or result.stdout.strip()}"
-        )
-    return result.stdout, elapsed_ms
+        raise RuntimeError(f"Circe R Error:\n{result.stderr or result.stdout}")
+    return result.stdout, elapsed
 
 
 def execute_circe_sql(
-    con: ibis.BaseBackend,
+    con: IbisConnection,
+    cfg: AnyProfile,
     sql: str,
-    result_schema: str,
-    target_table: str,
-    cohort_id: int,
-    temp_schema: str,
 ) -> tuple[int, dict[str, float]]:
-    qualified_table = qualify_identifier(target_table, result_schema)
+    target_schema = cfg.result_schema or cfg.cdm_schema
+    qualified_table = qualify_identifier(cfg.cohort_table, target_schema)
 
-    if result_schema:
+    if cfg.result_schema:
         try:
-            con.raw_sql(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(result_schema)}")
+            con.raw_sql(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(cfg.result_schema)}")
         except Exception:
             pass
 
-    create_table_sql = f"""
-        CREATE TABLE IF NOT EXISTS {qualified_table} (
-            cohort_definition_id BIGINT,
-            subject_id BIGINT,
-            cohort_start_date DATE,
-            cohort_end_date DATE
-        )
-    """
     try:
-        con.raw_sql(create_table_sql)
+        con.raw_sql(f"""
+            CREATE TABLE IF NOT EXISTS {qualified_table} (
+                cohort_definition_id BIGINT, subject_id BIGINT, 
+                cohort_start_date DATE, cohort_end_date DATE
+            )
+        """)
     except Exception as e:
-        print(f"Warning: Failed to ensure target table exists: {e}", file=sys.stderr)
+        print(f"Warning: Target table ensure failed: {e}", file=sys.stderr)
 
     statements = _split_sql_statements(sql)
-
     sql_start = time.perf_counter()
     for stmt in statements:
-        if not stmt.strip():
-            continue
-        try:
-            con.raw_sql(stmt)
-        except Exception as e:
-            print(f"Error executing statement:\n{stmt[:200]}...", file=sys.stderr)
-            raise e
-
-    sql_exec_ms = (time.perf_counter() - sql_start) * 1000
+        if stmt.strip():
+            try:
+                con.raw_sql(stmt)
+            except Exception as e:
+                print(f"SQL Fail:\n{stmt[:100]}...", file=sys.stderr)
+                raise e
+    sql_ms = (time.perf_counter() - sql_start) * 1000
 
     count_start = time.perf_counter()
-    # --- POLARS FIX ---
-    count_query = f"SELECT COUNT(*) FROM {qualified_table} WHERE cohort_definition_id = {cohort_id}"
+    count_query = f"SELECT COUNT(*) FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}"
     pl_df = con.sql(count_query).to_polars()
     row_count = int(pl_df.item(0, 0))
-
-    count_query_ms = (time.perf_counter() - count_start) * 1000
+    count_ms = (time.perf_counter() - count_start) * 1000
 
     try:
         con.raw_sql(
-            f"DELETE FROM {qualified_table} WHERE cohort_definition_id = {cohort_id}"
+            f"DELETE FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}"
         )
-    except Exception as e:
-        print(f"Warning: Failed to clean up rows: {e}", file=sys.stderr)
+    except Exception:
+        pass
 
-    metrics = {"sql_exec_ms": sql_exec_ms, "count_query_ms": count_query_ms}
-    return row_count, metrics
+    return row_count, {"sql_exec_ms": sql_ms, "count_query_ms": count_ms}
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Compare Python/Ibis and Circe-generated cohort row counts."
-    )
+# -----------------------------------------------------------------------------
+# 5. MAIN
+# -----------------------------------------------------------------------------
 
-    parser.add_argument(
-        "--config", default="profiles.yml", help="Path to YAML config file."
-    )
-    parser.add_argument("--profile", help="Name of the profile in YAML to use.")
-    parser.add_argument(
-        "--backend", help="Override backend (e.g., duckdb, databricks)."
-    )
 
-    parser.add_argument(
-        "--json",
-        default="cohorts/6243-dementia-outcome-v1.json",
-        help="Path to cohort JSON.",
-    )
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="profiles.yaml")
+    parser.add_argument("--profile")
+    parser.add_argument("--backend")  # Can strictly change the Pydantic model used!
 
-    parser.add_argument(
-        "--cdm-db", help="Local DuckDB path (Shortcut for simple local runs)."
-    )
-    parser.add_argument("--cdm-schema", default="main", help="CDM Schema.")
-    parser.add_argument("--vocab-schema", help="Vocab Schema.")
-    parser.add_argument("--result-schema", help="Result Schema.")
-    parser.add_argument("--target-table", default="circe_cohort", help="Target Table.")
-    parser.add_argument("--temp-schema", default="scratch", help="Temp Schema.")
+    # Pydantic will validate these paths exist when we merge them
+    parser.add_argument("--json")
+    parser.add_argument("--cdm-db")
 
-    parser.add_argument(
-        "--cohort-id", type=int, default=1, help="Cohort Definition ID."
-    )
+    parser.add_argument("--cdm-schema")
+    parser.add_argument("--vocab-schema")
+    parser.add_argument("--result-schema")
+    parser.add_argument("--target-table")
+    parser.add_argument("--temp-schema")
+    parser.add_argument("--cohort-id", type=int)
 
-    parser.add_argument("--python-sql-out", help="Save Python SQL to file.")
-    parser.add_argument("--circe-sql-out", help="Save Circe SQL to file.")
-    parser.add_argument("--python-stage-dir", help="Save intermediate stage SQL.")
-    parser.add_argument(
-        "--python-debug-prefix", help="Debug prefix for intermediate tables."
-    )
-
+    parser.add_argument("--python-sql-out")
+    parser.add_argument("--circe-sql-out")
+    parser.add_argument("--python-stage-dir")
+    parser.add_argument("--python-debug-prefix")
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-
-    config = {}
-    if args.config and args.profile:
-        config = load_config_with_env_vars(args.config, args.profile)
-
-    cdm_schema = args.cdm_schema or config.get("cdm_schema")
-    if not cdm_schema:
-        print(
-            "Error: --cdm-schema is required (via CLI or profiles.yaml)",
-            file=sys.stderr,
-        )
-        return 1
-
-    vocab_schema = args.vocab_schema or config.get("vocab_schema") or cdm_schema
-    result_schema = args.result_schema or config.get("result_schema")
-    temp_schema = args.temp_schema or config.get("temp_schema")
-
-    target_table = args.target_table or config.get("target_table") or "target_table"
-
-
-    json_path = Path(args.json)
-    if not json_path.exists():
-        raise SystemExit(f"Cohort JSON not found: {json_path}")
-
-    con = get_connection(args)
-    ohdsi_dialect = get_ohdsi_dialect(con)
-    print(f"Detected OHDSI Dialect: {ohdsi_dialect}")
-
-    stage_capture = bool(args.python_stage_dir or args.python_debug_prefix)
-    python_sql, python_count, python_metrics, python_stages = run_python_pipeline(
-        con=con,
-        json_path=json_path,
-        cdm_schema=cdm_schema,
-        vocab_schema=vocab_schema,
-        capture_stages=stage_capture,
-        debug_prefix=args.python_debug_prefix,
-    )
-
-    if args.python_sql_out:
-        Path(args.python_sql_out).write_text(python_sql)
-
-    target_schema = result_schema
-
-    circe_sql, circe_gen_ms = generate_circe_sql_via_r(
-        json_path=json_path,
-        target_dialect=ohdsi_dialect,
-        cdm_schema=cdm_schem,
-        vocab_schema=vocab_schema,
-        result_schema=result_schema,
-        target_schema=target_schema,
-        target_table=target_table,
-        cohort_id=args.cohort_id,
-        temp_schema=temp_schema,
-    )
-
-    if args.circe_sql_out:
-        Path(args.circe_sql_out).write_text(circe_sql)
-
-    circe_count, circe_exec_metrics = execute_circe_sql(
-        con=con,
-        sql=circe_sql,
-        result_schema=target_schema,
-        target_table=target_table,
-        cohort_id=args.cohort_id,
-        temp_schema=temp_schema,
-    )
-
-    python_total_ms = python_metrics["total_ms"]
-    circe_total_ms = circe_gen_ms + circe_exec_metrics.get("sql_exec_ms", 0.0)
-
-    print("-" * 60)
-    print(f"Python/Ibis row count: {python_count:<10} (exec={python_total_ms:.1f}ms)")
-    print(f"Circe row count:       {circe_count:<10} (exec={circe_total_ms:.1f}ms)")
-    print("-" * 60)
-
-    if python_count != circe_count:
-        print("Row counts do not match.", file=sys.stderr)
-        return 1
-
-    print("Row counts match.")
-    return 0
-
-
-if __name__ == "__main__":
+def main():
     try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(f"Fatal Error: {exc}", file=sys.stderr)
+        args = parse_args()
+
+        # 1. The Pydantic Power Move
+        # Validate YAML file -> Pick Profile -> Merge CLI -> Validate Result
+        cfg = resolve_config(args)
+
+        # 2. Connect
+        # cfg is now strictly typed (e.g. DatabricksProfile).
+        # cfg.access_token exists. cfg.database might NOT exist if it's Databricks.
+        con = get_connection(cfg)
+
+        dialect = get_ohdsi_dialect(con)
+        print(f"Dialect: {dialect} | Backend: {cfg.backend}")
+        print(f"CDM: {cfg.cdm_schema}")
+
+        # 3. PYTHON PIPELINE
+        py_sql, py_count, py_metrics, py_stages = run_python_pipeline(con, cfg)
+        if cfg.python_sql_out:
+            cfg.python_sql_out.write_text(py_sql)
+        if cfg.python_stage_dir and py_stages:
+            cfg.python_stage_dir.mkdir(parents=True, exist_ok=True)
+            # Stage saving logic omitted for brevity
+
+        # 4. CIRCE PIPELINE
+        circe_sql, circe_gen_ms = generate_circe_sql_via_r(cfg, dialect)
+        if cfg.circe_sql_out:
+            cfg.circe_sql_out.write_text(circe_sql)
+
+        circe_count, circe_metrics = execute_circe_sql(con, cfg, circe_sql)
+
+        # 5. REPORT
+        print("-" * 60)
+        print(f"Python: {py_count:<10} (Total {py_metrics['total_ms']:.1f}ms)")
+        print(
+            f"Circe:  {circe_count:<10} (Total {circe_gen_ms + circe_metrics['sql_exec_ms']:.1f}ms)"
+        )
+        print("-" * 60)
+
+        return 0 if py_count == circe_count else 1
+
+    except Exception as e:
+        print(f"Fatal Error: {e}", file=sys.stderr)
         import traceback
 
         traceback.print_exc()
-        raise SystemExit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    main()

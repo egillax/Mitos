@@ -16,9 +16,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency checked at runtime.
     duckdb = None
 
-from ibis_cohort.cohort_expression import CohortExpression
-from ibis_cohort.build_context import CohortBuildOptions, BuildContext, compile_codesets
-from ibis_cohort.builders.pipeline import build_primary_events
+from mitos.cohort_expression import CohortExpression
+from mitos.build_context import CohortBuildOptions, BuildContext, compile_codesets
+from mitos.builders.pipeline import build_primary_events
 from compare_cohort_counts import (
     generate_circe_sql_via_r,
     quote_ident,

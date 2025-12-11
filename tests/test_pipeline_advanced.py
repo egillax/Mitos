@@ -3,9 +3,9 @@ from datetime import datetime
 import polars as pl
 import ibis
 
-from ibis_cohort.build_context import BuildContext, CohortBuildOptions, compile_codesets
-from ibis_cohort.builders.pipeline import build_primary_events
-from ibis_cohort.cohort_expression import CohortExpression
+from mitos.build_context import BuildContext, CohortBuildOptions, compile_codesets
+from mitos.builders.pipeline import build_primary_events
+from mitos.cohort_expression import CohortExpression
 
 
 def test_pipeline_with_additional_inclusion_censoring_and_collapse():

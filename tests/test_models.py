@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ibis_cohort.cohort_expression import CohortExpression
+from mitos.cohort_expression import CohortExpression
 
 
 COHORT_FILES = sorted(Path("cohorts").glob("*.json")) + sorted(

@@ -6,9 +6,9 @@ import polars as pl
 import ibis
 import pytest
 
-from ibis_cohort.build_context import BuildContext, CohortBuildOptions, compile_codesets
-from ibis_cohort.builders.pipeline import build_primary_events
-from ibis_cohort.cohort_expression import CohortExpression
+from mitos.build_context import BuildContext, CohortBuildOptions, compile_codesets
+from mitos.builders.pipeline import build_primary_events
+from mitos.cohort_expression import CohortExpression
 
 
 PHENOTYPE_SAMPLE = [

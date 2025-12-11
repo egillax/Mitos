@@ -1,8 +1,8 @@
 import ibis
 
-from ibis_cohort.concept_set import ConceptSet, ConceptSetExpression, ConceptSetItem
-from ibis_cohort.criteria import Concept
-from ibis_cohort.build_context import CohortBuildOptions, compile_codesets
+from mitos.concept_set import ConceptSet, ConceptSetExpression, ConceptSetItem
+from mitos.criteria import Concept
+from mitos.build_context import CohortBuildOptions, compile_codesets
 
 
 def test_compile_codesets_handles_descendants_and_exclusions():

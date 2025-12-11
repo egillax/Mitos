@@ -3,9 +3,9 @@ from datetime import datetime
 import polars as pl
 import ibis
 
-from ibis_cohort.build_context import BuildContext, CohortBuildOptions
-from ibis_cohort.builders.registry import build_events
-from ibis_cohort.tables import ObservationPeriod
+from mitos.build_context import BuildContext, CohortBuildOptions
+from mitos.builders.registry import build_events
+from mitos.tables import ObservationPeriod
 
 
 def make_context(conn):

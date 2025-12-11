@@ -2,13 +2,13 @@ import ibis
 import polars as pl
 from datetime import date, datetime
 
-from ibis_cohort.build_context import BuildContext, CohortBuildOptions
-from ibis_cohort.builders.common import (
+from mitos.build_context import BuildContext, CohortBuildOptions
+from mitos.builders.common import (
     apply_age_filter,
     apply_codeset_filter,
     apply_observation_window,
 )
-from ibis_cohort.criteria import NumericRange
+from mitos.criteria import NumericRange
 
 
 def make_context(conn):

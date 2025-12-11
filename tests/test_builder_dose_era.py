@@ -4,9 +4,9 @@ import uuid
 import polars as pl
 import ibis
 
-from ibis_cohort.build_context import BuildContext, CohortBuildOptions
-from ibis_cohort.builders.registry import build_events
-from ibis_cohort.tables import DoseEra
+from mitos.build_context import BuildContext, CohortBuildOptions
+from mitos.builders.registry import build_events
+from mitos.tables import DoseEra
 
 def make_context(conn, concept_ids):
     codesets = ibis.memtable(

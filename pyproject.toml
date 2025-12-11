@@ -3,18 +3,23 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ibis-cohort"
+name = "Mitos"
 version = "0.1.0"
 description = "Ibis-based recreation of the OHDSI Circe cohort expression builder."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
-authors = [{name = "Ibis Cohort Developers"}]
+authors = [{name = "Egill A. Fridgeirsson", email = "e.fridgeirsson@erasmusmc.nl"}]
 dependencies = [
     "ibis-framework>=8.0.0",
     "pydantic>=2.0.0",
     "duckdb>=0.9.0",
     "polars>=1.7.0",
+    "packaging>=25.0",
+    "pyyaml>=6.0.3",
+    "pyarrow>=22.0.0",
+    "pandas>=2.3.3",
+    "pyarrow-hotfix>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +28,12 @@ test = [
 ]
 
 [project.scripts]
-ibis-cohort = "ibis_cohort.cli:main"
+Mitos = "mitos.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.37.0",
+]
