@@ -36,4 +36,5 @@ where = ["src"]
 [dependency-groups]
 dev = [
     "ipython>=8.37.0",
+    "pytest>=9.0.1",
 ]
