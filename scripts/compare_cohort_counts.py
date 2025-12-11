@@ -102,7 +102,6 @@ class DatabricksProfile(BaseProfile):
     catalog: str | None = None
     http_headers: dict[str, str] | None = None
     session_configuration: dict[str, str] | None = None
-    
 
     @model_validator(mode="after")
     def validate_token(self) -> "DatabricksProfile":
@@ -289,25 +288,11 @@ def _split_sql_statements(sql_script: str) -> list[str]:
     return statements
 
 
-def _clean_schema(schema_str: str | None, backend: str) -> str | None:
-    """
-    For Databricks, Ibis expects the schema argument to be JUST the schema,
-    not 'catalog.schema'. The catalog should be handled by the connection context.
-    """
-    if not schema_str:
-        return None
-    if backend == "databricks" and "." in schema_str:
-        return schema_str.split(".")[-1]
-    return schema_str
-
 def run_python_pipeline(
     con: IbisConnection,
     cfg: AnyProfile,
 ) -> tuple[str, int, dict[str, float], list[dict]]:
     expression = CohortExpression.model_validate_json(cfg.json_path.read_text())
-
-    ibis_cdm_schema = _clean_schema(cfg.cdm_schema, cfg.backend)
-    ibis_vocab_schema = _clean_schema(cfg.vocab_schema, cfg.backend)
 
     options = CohortBuildOptions(
         cdm_schema=cfg.cdm_schema,
