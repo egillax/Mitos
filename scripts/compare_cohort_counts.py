@@ -102,6 +102,17 @@ class DatabricksProfile(BaseProfile):
     catalog: str | None = None
     http_headers: dict[str, str] | None = None
     session_configuration: dict[str, str] | None = None
+    
+
+    @model_validator(mode="after")
+    def validate_token(self) -> "DatabricksProfile":
+        token_val = self.access_token.get_secret_value()
+        if token_val.startswith("${"):
+            raise ValueError(
+                f"The access_token appears to be an unresolved variable: '{token_val}'. "
+                "Ensure the access_token is set to a valid environment variable."
+            )
+        return self
 
     def get_ibis_connection_params(self) -> dict[str, Any]:
         params = {
