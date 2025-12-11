@@ -98,12 +98,20 @@ class DatabricksProfile(BaseProfile):
     server_hostname: str = Field(alias="host")
     http_path: str
     access_token: SecretStr
+    port: int = 443
+    catalog: str | None = None
+    http_headers: dict[str, str] | None = None
+    session_configuration: dict[str, str] | None = None
 
     def get_ibis_connection_params(self) -> dict[str, Any]:
         return {
             "server_hostname": self.server_hostname,
             "http_path": self.http_path,
             "access_token": self.access_token.get_secret_value(),
+            "port": self.port,
+            "catalog": self.catalog,
+            "http_headers": self.http_headers,
+            "session_configuration": self.session_configuration,
         }
 
 
