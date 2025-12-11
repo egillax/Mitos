@@ -115,6 +115,12 @@ class BuildContext:
         table_name = f"_stage_{label}_{step_id}"
         profile_filename: Path | None = None
         profiling_enabled = False
+        use_temp_schema = temp and self._options.temp_emulation_schema is not None
+        qualified_name = (
+            _qualify_name(self._options.temp_emulation_schema, table_name)
+            if use_temp_schema
+            else _quote_identifier(table_name)
+        )
         if self._profile_dir is not None:
             profile_filename = (self._profile_dir / f"ibis_profile_{label}_{step_id}.json").resolve()
             try:
@@ -125,9 +131,11 @@ class BuildContext:
             except Exception as exc:  # pragma: no cover - diagnostics only
                 print(f"Warning: Could not enable profiling for {label}: {exc}")
         sql = expr.compile().strip().rstrip(";")
-        temp_kw = "TEMP " if temp else ""
-        quoted_table = _quote_identifier(table_name)
-        create_sql = f"CREATE {temp_kw}TABLE {quoted_table} AS {sql}"
+        if use_temp_schema:
+            create_sql = f"CREATE TABLE {qualified_name} AS {sql}"
+        else:
+            temp_kw = "TEMP " if temp else ""
+            create_sql = f"CREATE {temp_kw}TABLE {qualified_name} AS {sql}"
         try:
             self._conn.raw_sql(create_sql)
         except Exception as exc:
@@ -146,18 +154,23 @@ class BuildContext:
             print(f" [Profile Captured]: {profile_filename} (Table: {table_name})")
         if analyze:
             try:
-                self._conn.raw_sql(f"ANALYZE {table_name}")
+                self._conn.raw_sql(f"ANALYZE {qualified_name}")
             except Exception:
                 pass
         def _drop():
             try:
-                self._conn.drop_table(table_name)
+                if use_temp_schema:
+                    self._conn.raw_sql(f"DROP TABLE IF EXISTS {qualified_name}")
+                else:
+                    self._conn.drop_table(table_name)
             except Exception:
                 try:
-                    self._conn.raw_sql(f"DROP TABLE IF EXISTS {table_name}")
+                    self._conn.raw_sql(f"DROP TABLE IF EXISTS {qualified_name}")
                 except Exception:
                     pass
         self.register_cleanup(_drop)
+        if use_temp_schema:
+            return self._table(self._options.temp_emulation_schema, table_name)
         return self._conn.table(table_name)
 
     @property

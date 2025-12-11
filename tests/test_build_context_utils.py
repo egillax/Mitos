@@ -1,4 +1,5 @@
 from mitos.build_context import (
+    BuildContext,
     CohortBuildOptions,
     _materialize_codesets,
     _qualify_name,
@@ -54,6 +55,10 @@ class DummyBackend:
         self.calls.append(("create_table", name, temp, overwrite, expr))
         return FakeTable(name)
 
+    def drop_table(self, name):  # pragma: no cover
+        self.calls.append(("drop_table", name))
+        return None
+
 
 def test_qualify_name_handles_catalog_and_schema():
     assert _qualify_name(None, "events") == '"events"'
@@ -97,6 +102,29 @@ def test_materialize_codesets_qualifies_temp_emulation_schema():
 
     # Ensure drop is qualified and callable
     resource.cleanup()
+    drop_calls = [call[1] for call in conn.calls if call[0] == "raw_sql" and "DROP TABLE" in call[1]]
+    assert drop_calls
+    assert '"catalog"."schema"' in drop_calls[-1]
+
+
+def test_materialize_respects_temp_emulation_schema_for_stages():
+    options = CohortBuildOptions(temp_emulation_schema="catalog.schema")
+    conn = DummyBackend(table_behavior="schema")
+    ctx = BuildContext(conn, options, FakeTable("codesets"))
+
+    table = ctx.materialize(FakeExpr("SELECT 1"), label="t1", temp=True, analyze=True)
+    assert isinstance(table, FakeTable)
+
+    create_calls = [call[1] for call in conn.calls if call[0] == "raw_sql" and "CREATE TABLE" in call[1]]
+    assert create_calls
+    assert '"catalog"."schema"' in create_calls[0]
+    assert "TEMP" not in create_calls[0]
+
+    analyze_calls = [call[1] for call in conn.calls if call[0] == "raw_sql" and call[1].startswith("ANALYZE")]
+    assert analyze_calls
+    assert '"catalog"."schema"' in analyze_calls[0]
+
+    ctx.close()
     drop_calls = [call[1] for call in conn.calls if call[0] == "raw_sql" and "DROP TABLE" in call[1]]
     assert drop_calls
     assert '"catalog"."schema"' in drop_calls[-1]
