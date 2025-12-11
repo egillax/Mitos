@@ -9,6 +9,8 @@ Ibis to construct queries against OMOP CDM vocabularies.
   compiler, and a small CLI (`Mitos` or `python -m mitos.cli`) that can
   print the SQL for a cohort's primary criteria or execute the pipeline.
 - `cohorts/`: Example ATLAS cohort JSON exports used for local testing.
+- `cohorts/phenotypes/`: Small phenotype samples used by smoke tests and
+  quick parity checks.
 - `tests/`: Pytest suite that round-trips cohort JSON and validates the
   concept-set compiler.
 

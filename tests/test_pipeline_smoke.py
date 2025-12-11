@@ -12,9 +12,9 @@ from mitos.cohort_expression import CohortExpression
 
 
 PHENOTYPE_SAMPLE = [
-    Path("fixtures/phenotypes/phenotype-2.json"),
-    Path("fixtures/phenotypes/phenotype-30.json"),
-    Path("fixtures/phenotypes/phenotype-78.json"),
+    Path("cohorts/phenotypes/phenotype-2.json"),
+    Path("cohorts/phenotypes/phenotype-30.json"),
+    Path("cohorts/phenotypes/phenotype-78.json"),
 ]
 
 

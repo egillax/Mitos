@@ -1,7 +1,7 @@
 #' Export phenotypes from the OHDSI PhenotypeLibrary into local JSON files.
 #'
 #' Usage:
-#'   Rscript scripts/export_phenotypes.R --ids 1,2,3 --out fixtures/phenotypes
+#'   Rscript scripts/export_phenotypes.R --ids 1,2,3 --out cohorts/phenotypes
 
 suppressPackageStartupMessages({
   library(optparse)
@@ -18,7 +18,7 @@ option_list <- list(
   optparse::make_option(
     "--out",
     type = "character",
-    default = "fixtures/phenotypes",
+    default = "cohorts/phenotypes",
     help = "Output directory for cohort JSON files."
   )
 )

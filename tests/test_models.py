@@ -7,7 +7,7 @@ from mitos.cohort_expression import CohortExpression
 
 
 COHORT_FILES = sorted(Path("cohorts").glob("*.json")) + sorted(
-    Path("fixtures/phenotypes").glob("*.json")
+    Path("cohorts/phenotypes").glob("*.json")
 )
 UNSUPPORTED_CRITERIA = set()
 

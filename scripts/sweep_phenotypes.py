@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--phenotype-dir",
-        default="fixtures/phenotypes",
+        default="cohorts/phenotypes",
         help="Directory containing phenotype JSON files.",
     )
     parser.add_argument(
