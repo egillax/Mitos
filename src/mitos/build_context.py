@@ -62,13 +62,23 @@ class BuildContext:
         weakref.finalize(self, self.close)
 
     def _table(self, schema: Optional[str], name: str) -> ir.Table:
+        # 1. Try standard Ibis mechanisms first
         if schema:
             try:
-                return self._conn.table(name, schema=schema)
-            except TypeError:
-                qualified = f"{_quote_identifier(schema)}.{_quote_identifier(name)}"
-                return self._conn.sql(f"SELECT * FROM {qualified}")
-        return self._conn.table(name)
+                # Standard Ibis (Databricks/Spark often prefer this)
+                return self._conn.table(name, database=schema)
+            except Exception:
+                try:
+                    # Legacy or specific backend (DuckDB often prefers this)
+                    return self._conn.table(name, schema=schema)
+                except Exception:
+                    pass
+
+        # 2. Fallback: Fully Qualified SQL Construction
+        # Useful for backends or setups where Ibis doesn't natively handle
+        # "catalog.schema" strings passed to the schema/database arg.
+        qualified_name = _qualify_name(schema, name)
+        return self._conn.sql(f"SELECT * FROM {qualified_name}")
 
     def table(self, name: str) -> ir.Table:
         """Return a CDM table."""
@@ -309,13 +319,18 @@ def _compile_single_codeset(
 
 
 def _table(conn: ibis.BaseBackend, schema: Optional[str], name: str) -> ir.Table:
+    """Standalone version of _table for use in compile_codesets."""
     if schema:
         try:
-            return conn.table(name, schema=schema)
-        except TypeError:
-            qualified = f"{_quote_identifier(schema)}.{_quote_identifier(name)}"
-            return conn.sql(f"SELECT * FROM {qualified}")
-    return conn.table(name)
+            return conn.table(name, database=schema)
+        except Exception:
+            try:
+                return conn.table(name, schema=schema)
+            except Exception:
+                pass
+
+    qualified_name = _qualify_name(schema, name)
+    return conn.sql(f"SELECT * FROM {qualified_name}")
 
 
 def _ids_memtable(ids: list[int]) -> Optional[ir.Table]:
@@ -382,10 +397,18 @@ def _materialize_codesets(
 ) -> CodesetResource:
     name = f"_codesets_{uuid.uuid4().hex}"
     if options.temp_emulation_schema:
-        schema = options.temp_emulation_schema
-        qualified = f'"{schema}"."{name}"'
+        # FIX: Use _qualify_name to handle "catalog.schema" correctly
+        qualified = _qualify_name(options.temp_emulation_schema, name)
         conn.raw_sql(f"CREATE TABLE {qualified} AS {expr.compile()}")
-        table = conn.table(name, schema=schema)
+
+        # When retrieving the table object, we try to use the Ibis table method
+        # If that fails due to the catalog issue, we fallback to SQL selection
+        try:
+            table = _table(conn, options.temp_emulation_schema, name)
+        except Exception:
+            # Absolute fallback if _table's Ibis logic fails to attach to the new table
+            table = conn.sql(f"SELECT * FROM {qualified}")
+
         drop_sql = f"DROP TABLE IF EXISTS {qualified}"
     else:
         conn.create_table(name, expr, temp=True, overwrite=True)
@@ -408,6 +431,20 @@ def _quote_identifier(identifier: str) -> str:
         return identifier
     escaped = identifier.replace('"', '""')
     return f'"{escaped}"'
+
+def _qualify_name(schema: Optional[str], name: str) -> str:
+    """
+    Constructs a fully qualified SQL identifier (e.g. "catalog"."schema"."table").
+    Handles splitting schema strings that contain dots.
+    """
+    quoted_name = _quote_identifier(name)
+    if not schema:
+        return quoted_name
+
+    parts = schema.split(".")
+    quoted_schema_parts = [_quote_identifier(p) for p in parts]
+    # Rejoin catalog/schema parts with the table name
+    return ".".join(quoted_schema_parts + [quoted_name])
 
 
 def _union_distinct(tables: Iterable[Optional[ir.Table]]) -> Optional[ir.Table]:
