@@ -57,7 +57,7 @@ class BaseProfile(BaseModel):
     temp_schema: str | None = None
 
     json_path: FilePath = Field(default=Path("cohorts/6243-dementia-outcome-v1.json"))
-    cohort_table: str = "circe_cohort"
+    cohort_table: str = Field(default="circe_cohort", alias="target_table")
     cohort_id: int = 1
 
     capture_stages: bool = False
