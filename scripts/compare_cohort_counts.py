@@ -351,9 +351,12 @@ def run_python_pipeline(
                 safe_suffix = re.sub(r"[^A-Za-z0-9_]", "_", safe_src)
                 target = f"{cfg.debug_prefix}_{stage['index']:02d}_{safe_suffix}"
                 try:
-                    con.raw_sql(
-                        f"CREATE TABLE {quote_ident(target)} AS SELECT * FROM {quote_ident(safe_src)}"
+                    src_table = (
+                        con.table(safe_src, database=cfg.temp_schema)
+                        if cfg.temp_schema
+                        else con.table(safe_src)
                     )
+                    con.create_table(target, obj=src_table, overwrite=True)
                 except Exception as e:
                     print(
                         f"Warning: Failed to save debug table {target}: {e}",

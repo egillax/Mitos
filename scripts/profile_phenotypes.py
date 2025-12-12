@@ -54,7 +54,10 @@ def profile_ibis_sql(conn, sql: str, output_path: Path) -> None:
     try:
         _profile_statement(conn, statement, output_path)
     finally:
-        conn.raw_sql(f"DROP TABLE IF EXISTS {sink_name}")
+        try:
+            conn.drop_table(sink_name, force=True)
+        except Exception:
+            pass
 
 
 def profile_circe_sql(
@@ -180,7 +183,7 @@ def profile_expression(
         count_ms = None
         if options.generate_stats:
             count_start = time.perf_counter()
-            row_count = conn.raw_sql(f"SELECT COUNT(*) FROM ({sql}) t").fetchone()[0]
+            row_count = int(events.count().execute())
             count_ms = (time.perf_counter() - count_start) * 1000
         return {
             "compile_ms": compile_ms,
