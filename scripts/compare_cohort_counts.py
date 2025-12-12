@@ -9,6 +9,8 @@ import subprocess
 import textwrap
 import time
 import shutil
+import tempfile
+import contextlib
 from pathlib import Path
 from typing import Any, Literal, Annotated
 
@@ -440,6 +442,10 @@ def generate_circe_sql_via_r(
     target_schema_arg = cfg.result_schema or cfg.cdm_schema
     result_schema_arg = cfg.result_schema or cfg.cdm_schema
 
+    # Write to a temp file to avoid any stdout capture/encoding issues on Windows.
+    with tempfile.NamedTemporaryFile(prefix="mitos_circe_", suffix=".sql", delete=False) as fh:
+        out_path = Path(fh.name)
+
     r_script = textwrap.dedent(
         """
         suppressPackageStartupMessages({library(CirceR); library(SqlRender)})
@@ -447,6 +453,11 @@ def generate_circe_sql_via_r(
         json_path <- args[[1]]; cdm_schema <- args[[2]]; vocab_schema <- args[[3]]
         result_schema <- args[[4]]; target_schema <- args[[5]]; target_table <- args[[6]]
         cohort_id <- as.integer(args[[7]]); temp_schema <- args[[8]]; target_dialect <- args[[9]]
+        out_path <- args[[10]]
+
+        out_path <- normalizePath(out_path, winslash = "/", mustWork = FALSE)
+        cat("MITOS_CIRCE_BEGIN\\n", file=stderr())
+        cat(paste0("MITOS_CIRCE_OUT_PATH=", out_path, "\\n"), file=stderr())
 
         json_str <- paste(readLines(json_path, warn = FALSE), collapse = "\\n")
         expression <- CirceR::cohortExpressionFromJson(json_str)
@@ -463,11 +474,19 @@ def generate_circe_sql_via_r(
                                  target_cohort_id=cohort_id,
                                  tempEmulationSchema=if(temp_schema=="") NULL else temp_schema)
         cat(SqlRender::translate(sql=sql, targetDialect=target_dialect))
+        translated <- SqlRender::translate(sql=sql, targetDialect=target_dialect)
+        if (length(translated) == 0 || nchar(translated) == 0) {
+          cat("MITOS_CIRCE_EMPTY_SQL\\n", file=stderr())
+          quit(status = 2)
+        }
+        writeLines(translated, out_path, useBytes = TRUE)
+        cat("MITOS_CIRCE_WROTE_SQL\\n", file=stderr())
         """
     ).strip()
 
     cmd = [
         rscript_exe,
+        "--vanilla",
         "-e",
         r_script,
         str(cfg.json_path),
@@ -479,25 +498,36 @@ def generate_circe_sql_via_r(
         str(cfg.cohort_id),
         temp_arg,
         target_dialect,
+        str(out_path),
     ]
 
     start = time.perf_counter()
     result = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = (time.perf_counter() - start) * 1000
+    stderr = (result.stderr or "").strip()
     if result.returncode != 0:
-        raise RuntimeError(f"Circe R Error:\n{result.stderr or result.stdout}")
-    stdout = (result.stdout or "").strip()
-    if not stdout:
-        stderr = (result.stderr or "").strip()
-        hint = (
-            "Circe SQL generation returned empty output.\n"
-            "This usually means the R script ran but produced no SQL (e.g. missing R packages, "
-            "failed JSON parsing, or a silent error/warning).\n"
-            "Try running the R command directly and ensure `CirceR` and `SqlRender` are installed.\n"
+        raise RuntimeError(
+            "Circe R Error.\n"
+            f"returncode={result.returncode}\n"
+            f"stderr:\n{stderr or '<empty>'}\n"
         )
-        details = f"stderr:\n{stderr}\n" if stderr else "stderr: <empty>\n"
-        raise RuntimeError(hint + details)
-    return result.stdout, elapsed
+
+    try:
+        sql_text = out_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        sql_text = ""
+    finally:
+        with contextlib.suppress(Exception):
+            out_path.unlink()
+
+    if not sql_text:
+        raise RuntimeError(
+            "Circe SQL generation returned empty output.\n"
+            "R returned success but produced no SQL file content.\n"
+            f"stderr:\n{stderr or '<empty>'}\n"
+        )
+
+    return sql_text, elapsed
 
 
 def execute_circe_sql(
