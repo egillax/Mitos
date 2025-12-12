@@ -8,6 +8,7 @@ import sys
 import subprocess
 import textwrap
 import time
+import shutil
 from pathlib import Path
 from typing import Any, Literal, Annotated
 
@@ -62,6 +63,8 @@ class BaseProfile(BaseModel):
     python_sql_out: Path | None = None
     circe_sql_out: Path | None = None
     python_stage_dir: Path | None = None  # Not DirectoryPath (might not exist yet)
+    skip_circe: bool = False
+    rscript_path: str | None = None
 
     @model_validator(mode="after")
     def set_defaults(self) -> "BaseProfile":
@@ -251,6 +254,12 @@ def quote_ident(value: str) -> str:
     escaped = value.replace('"', '""')
     return f'"{escaped}"'
 
+def quote_ident_for_backend(value: str, backend: str) -> str:
+    if backend == "databricks":
+        escaped = value.replace("`", "``")
+        return f"`{escaped}`"
+    return quote_ident(value)
+
 
 def qualify_identifier(name: str, schema: str | None) -> str:
     if not schema:
@@ -258,6 +267,13 @@ def qualify_identifier(name: str, schema: str | None) -> str:
     parts = schema.split(".")
     quoted_schema = ".".join(quote_ident(p) for p in parts)
     return f"{quoted_schema}.{quote_ident(name)}"
+
+def qualify_identifier_for_backend(name: str, schema: str | None, backend: str) -> str:
+    if not schema:
+        return quote_ident_for_backend(name, backend)
+    parts = schema.split(".")
+    quoted_schema = ".".join(quote_ident_for_backend(p, backend) for p in parts)
+    return f"{quoted_schema}.{quote_ident_for_backend(name, backend)}"
 
 
 def wrap_count_query(sql: str) -> str:
@@ -378,6 +394,12 @@ def generate_circe_sql_via_r(
     cfg: AnyProfile,
     target_dialect: str,
 ) -> tuple[str, float]:
+    rscript_exe = cfg.rscript_path or shutil.which("Rscript")
+    if not rscript_exe:
+        raise RuntimeError(
+            "Rscript executable not found. Install R and ensure `Rscript` is on PATH, "
+            "or set `rscript_path` in your profile / pass `--rscript-path`."
+        )
     temp_arg = cfg.temp_schema or ""
     target_schema_arg = cfg.result_schema or cfg.cdm_schema
     result_schema_arg = cfg.result_schema or cfg.cdm_schema
@@ -409,7 +431,7 @@ def generate_circe_sql_via_r(
     ).strip()
 
     cmd = [
-        "Rscript",
+        rscript_exe,
         "-e",
         r_script,
         str(cfg.json_path),
@@ -437,13 +459,21 @@ def execute_circe_sql(
     sql: str,
 ) -> tuple[int, dict[str, float]]:
     target_schema = cfg.result_schema or cfg.cdm_schema
-    qualified_table = qualify_identifier(cfg.cohort_table, target_schema)
+    qualified_table = qualify_identifier_for_backend(
+        cfg.cohort_table, target_schema, cfg.backend
+    )
 
     if cfg.result_schema:
         try:
-            con.raw_sql(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(cfg.result_schema)}")
-        except Exception:
-            pass
+            con.raw_sql(
+                f"CREATE SCHEMA IF NOT EXISTS {'.'.join(quote_ident_for_backend(p, cfg.backend) for p in cfg.result_schema.split('.'))}"
+            )
+        except Exception as e:
+            if cfg.backend == "databricks":
+                raise RuntimeError(
+                    f"Failed to create result schema {cfg.result_schema!r}. "
+                    "Set `result_schema` to a writable catalog.schema or pre-create it with the right permissions."
+                ) from e
 
     try:
         con.raw_sql(f"""
@@ -453,6 +483,11 @@ def execute_circe_sql(
             )
         """)
     except Exception as e:
+        if cfg.backend == "databricks":
+            raise RuntimeError(
+                f"Failed to ensure Circe target table {qualified_table}. "
+                "Set `result_schema` to a writable schema or pre-create the table."
+            ) from e
         print(f"Warning: Target table ensure failed: {e}", file=sys.stderr)
 
     statements = _split_sql_statements(sql)
@@ -517,6 +552,8 @@ def parse_args():
     parser.add_argument("--circe-sql-out")
     parser.add_argument("--python-stage-dir")
     parser.add_argument("--python-debug-prefix")
+    parser.add_argument("--skip-circe", action="store_true")
+    parser.add_argument("--rscript-path")
     return parser.parse_args()
 
 
@@ -546,6 +583,13 @@ def main():
             # Stage saving logic omitted for brevity
 
         # 4. CIRCE PIPELINE
+        if cfg.skip_circe:
+            print("-" * 60)
+            print(f"Python: {py_count:<10} (Total {py_metrics['total_ms']:.1f}ms)")
+            print("Circe:  skipped")
+            print("-" * 60)
+            return 0
+
         circe_sql, circe_gen_ms = generate_circe_sql_via_r(cfg, dialect)
         if cfg.circe_sql_out:
             cfg.circe_sql_out.write_text(circe_sql)
