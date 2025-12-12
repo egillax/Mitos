@@ -442,12 +442,13 @@ def generate_circe_sql_via_r(
     target_schema_arg = cfg.result_schema or cfg.cdm_schema
     result_schema_arg = cfg.result_schema or cfg.cdm_schema
 
-    # Write to a temp file to avoid any stdout capture/encoding issues on Windows.
-    with tempfile.NamedTemporaryFile(prefix="mitos_circe_", suffix=".sql", delete=False) as fh:
-        out_path = Path(fh.name)
+    # Use a temp script file + output file for robust Windows execution.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="mitos_circe_"))
+    out_path = tmp_dir / "circe.sql"
+    script_path = tmp_dir / "circe.R"
 
     r_script = textwrap.dedent(
-        """
+        r"""
         suppressPackageStartupMessages({library(CirceR); library(SqlRender)})
         args <- commandArgs(trailingOnly = TRUE)
         json_path <- args[[1]]; cdm_schema <- args[[2]]; vocab_schema <- args[[3]]
@@ -456,39 +457,44 @@ def generate_circe_sql_via_r(
         out_path <- args[[10]]
 
         out_path <- normalizePath(out_path, winslash = "/", mustWork = FALSE)
-        cat("MITOS_CIRCE_BEGIN\\n", file=stderr())
-        cat(paste0("MITOS_CIRCE_OUT_PATH=", out_path, "\\n"), file=stderr())
+        cat("MITOS_CIRCE_BEGIN\n", file=stderr())
+        cat(paste0("MITOS_CIRCE_JSON_PATH=", json_path, "\n"), file=stderr())
+        cat(paste0("MITOS_CIRCE_OUT_PATH=", out_path, "\n"), file=stderr())
 
-        json_str <- paste(readLines(json_path, warn = FALSE), collapse = "\\n")
+        json_str <- paste(readLines(json_path, warn = FALSE), collapse = "\n")
+        if (length(json_str) == 0 || nchar(json_str) == 0) {
+          cat("MITOS_CIRCE_EMPTY_JSON\n", file=stderr())
+          quit(status = 3)
+        }
+
         expression <- CirceR::cohortExpressionFromJson(json_str)
         options <- CirceR::createGenerateOptions()
         options$generateStats <- FALSE; options$useTempTables <- FALSE;
         options$tempEmulationSchema <- if(temp_schema=="") NULL else temp_schema
-        
+
         sql <- CirceR::buildCohortQuery(expression, options)
-        sql <- SqlRender::render(sql, cdm_database_schema=cdm_schema, 
+        sql <- SqlRender::render(sql, cdm_database_schema=cdm_schema,
                                  vocabulary_database_schema=vocab_schema,
                                  results_database_schema=result_schema,
                                  target_database_schema=target_schema,
                                  target_cohort_table=target_table,
                                  target_cohort_id=cohort_id,
                                  tempEmulationSchema=if(temp_schema=="") NULL else temp_schema)
-        cat(SqlRender::translate(sql=sql, targetDialect=target_dialect))
         translated <- SqlRender::translate(sql=sql, targetDialect=target_dialect)
         if (length(translated) == 0 || nchar(translated) == 0) {
-          cat("MITOS_CIRCE_EMPTY_SQL\\n", file=stderr())
+          cat("MITOS_CIRCE_EMPTY_SQL\n", file=stderr())
           quit(status = 2)
         }
         writeLines(translated, out_path, useBytes = TRUE)
-        cat("MITOS_CIRCE_WROTE_SQL\\n", file=stderr())
+        cat("MITOS_CIRCE_WROTE_SQL\n", file=stderr())
         """
     ).strip()
+    script_path.write_text(r_script, encoding="utf-8")
 
     cmd = [
         rscript_exe,
         "--vanilla",
-        "-e",
-        r_script,
+        str(script_path),
         str(cfg.json_path),
         cfg.cdm_schema,
         cfg.vocab_schema,
@@ -505,11 +511,13 @@ def generate_circe_sql_via_r(
     result = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = (time.perf_counter() - start) * 1000
     stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
     if result.returncode != 0:
         raise RuntimeError(
             "Circe R Error.\n"
             f"returncode={result.returncode}\n"
             f"stderr:\n{stderr or '<empty>'}\n"
+            f"stdout:\n{stdout or '<empty>'}\n"
         )
 
     try:
@@ -519,12 +527,19 @@ def generate_circe_sql_via_r(
     finally:
         with contextlib.suppress(Exception):
             out_path.unlink()
+        with contextlib.suppress(Exception):
+            script_path.unlink()
+        with contextlib.suppress(Exception):
+            tmp_dir.rmdir()
+        with contextlib.suppress(Exception):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if not sql_text:
         raise RuntimeError(
             "Circe SQL generation returned empty output.\n"
             "R returned success but produced no SQL file content.\n"
             f"stderr:\n{stderr or '<empty>'}\n"
+            f"stdout:\n{stdout or '<empty>'}\n"
         )
 
     return sql_text, elapsed
