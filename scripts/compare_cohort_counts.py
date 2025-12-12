@@ -65,6 +65,8 @@ class BaseProfile(BaseModel):
     python_stage_dir: Path | None = None  # Not DirectoryPath (might not exist yet)
     skip_circe: bool = False
     rscript_path: str | None = None
+    circe_debug: bool = False
+    cleanup_circe: bool = True
 
     @model_validator(mode="after")
     def set_defaults(self) -> "BaseProfile":
@@ -216,6 +218,8 @@ def resolve_config(args: argparse.Namespace) -> AnyProfile:
         cli_args["database"] = cli_args.pop("cdm_db")
 
     merged_data = {**config_dict, **cli_args}
+    if args.no_cleanup_circe:
+        merged_data["cleanup_circe"] = False
 
     try:
         validator = TypeAdapter(AnyProfile)
@@ -293,6 +297,18 @@ def _exec_raw(con: IbisConnection, sql: str) -> None:
             cur.fetchall()
         except Exception:
             pass
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+def _fetch_scalar(con: IbisConnection, sql: str):
+    cur = con.raw_sql(sql)
+    try:
+        row = cur.fetchone()
+        return row[0] if row else None
     finally:
         try:
             cur.close()
@@ -512,13 +528,17 @@ def execute_circe_sql(
 
     statements = _split_sql_statements(sql)
     sql_start = time.perf_counter()
-    for stmt in statements:
-        if stmt.strip():
-            try:
-                _exec_raw(con, stmt)
-            except Exception as e:
-                print(f"SQL Fail:\n{stmt[:100]}...", file=sys.stderr)
-                raise e
+    for idx, stmt in enumerate(statements, start=1):
+        if not stmt.strip():
+            continue
+        if cfg.circe_debug:
+            preview = " ".join(stmt.strip().split())[:160]
+            print(f"[Circe SQL {idx}/{len(statements)}] {preview}")
+        try:
+            _exec_raw(con, stmt)
+        except Exception as e:
+            print(f"SQL Fail (stmt {idx}/{len(statements)}):\n{stmt[:400]}...", file=sys.stderr)
+            raise e
     sql_ms = (time.perf_counter() - sql_start) * 1000
 
     count_start = time.perf_counter()
@@ -536,13 +556,27 @@ def execute_circe_sql(
     )
     count_ms = (time.perf_counter() - count_start) * 1000
 
-    try:
-        _exec_raw(
-            con,
-            f"DELETE FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}"
-        )
-    except Exception:
-        pass
+    if cfg.circe_debug or row_count == 0:
+        try:
+            total = _fetch_scalar(con, f"SELECT COUNT(*) FROM {qualified_table}")
+            by_id = _fetch_scalar(
+                con,
+                f"SELECT COUNT(*) FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}",
+            )
+            print(
+                f"[Circe Debug] target={qualified_table} total_rows={total} rows_for_id={by_id}"
+            )
+        except Exception as e:
+            print(f"[Circe Debug] Could not query target table: {e}", file=sys.stderr)
+
+    if cfg.cleanup_circe:
+        try:
+            _exec_raw(
+                con,
+                f"DELETE FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}"
+            )
+        except Exception:
+            pass
 
     return row_count, {"sql_exec_ms": sql_ms, "count_query_ms": count_ms}
 
@@ -575,6 +609,8 @@ def parse_args():
     parser.add_argument("--python-debug-prefix")
     parser.add_argument("--skip-circe", action="store_true")
     parser.add_argument("--rscript-path")
+    parser.add_argument("--circe-debug", action="store_true")
+    parser.add_argument("--no-cleanup-circe", action="store_true")
     return parser.parse_args()
 
 
