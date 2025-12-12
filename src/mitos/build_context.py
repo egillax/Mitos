@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Union, Tuple
 import uuid
 import weakref
 
@@ -11,6 +11,21 @@ import ibis
 import ibis.expr.types as ir
 
 from .concept_set import ConceptSet
+
+Database = Union[str, Tuple[str, str]]
+
+
+def _qualify(database: Database | None, name: str) -> str:
+    """Only for statements were constructing outside of Ibis."""
+    if database is None:
+        return name
+    if isinstance(database, tuple):
+        return ".".join(database + (name,))
+    return f"{database}.{name}"
+
+
+def _table(conn: ibis.BaseBackend, database: Database | None, name: str) -> ir.Table:
+    return conn.table(name, database=database)
 
 
 @dataclass(frozen=True)
@@ -24,6 +39,7 @@ class CohortBuildOptions:
     temp_emulation_schema: Optional[str] = None
     profile_dir: Optional[str] = None
     capture_sql: bool = False
+    backend: Optional[str] = None
 
 
 @dataclass
@@ -42,7 +58,12 @@ class CodesetResource:
 class BuildContext:
     """Holds shared state (connection, schemas, compiled codesets) used across builders."""
 
-    def __init__(self, conn: ibis.BaseBackend, options: CohortBuildOptions, codeset_resource: CodesetResource | ir.Table):
+    def __init__(
+        self,
+        conn: ibis.BaseBackend,
+        options: CohortBuildOptions,
+        codeset_resource: CodesetResource | ir.Table,
+    ):
         self._conn = conn
         self._options = options
         if isinstance(codeset_resource, CodesetResource):
@@ -61,24 +82,11 @@ class BuildContext:
         self._slice_cache: dict[str, ir.Table] = {}
         weakref.finalize(self, self.close)
 
-    def _table(self, schema: Optional[str], name: str) -> ir.Table:
-        # 1. Try standard Ibis mechanisms first
-        if schema:
-            try:
-                # Standard Ibis (Databricks/Spark often prefer this)
-                return self._conn.table(name, database=schema)
-            except Exception:
-                try:
-                    # Legacy or specific backend (DuckDB often prefers this)
-                    return self._conn.table(name, schema=schema)
-                except Exception:
-                    pass
-
-        # 2. Fallback: Fully Qualified SQL Construction
-        # Useful for backends or setups where Ibis doesn't natively handle
-        # "catalog.schema" strings passed to the schema/database arg.
-        qualified_name = _qualify_name(schema, name)
-        return self._conn.sql(f"SELECT * FROM {qualified_name}")
+    def _table(self, database: Optional[str], name: str) -> ir.Table:
+        try:
+            return _table(self._conn, database, name)
+        except Exception:
+            return self._conn.sql(f"SELECT * FROM {_qualify(database, name)}")
 
     def table(self, name: str) -> ir.Table:
         """Return a CDM table."""
@@ -109,69 +117,74 @@ class BuildContext:
         analyze: bool = True,
     ) -> ir.Table:
         """
-        Materialize an Ibis expression, capturing a unique DuckDB profiling artifact for this step.
+        Materialize an Ibis expression, capturing a unique DuckDB profiling
+        artifact for this step.
         """
         step_id = uuid.uuid4().hex[:8]
         table_name = f"_stage_{label}_{step_id}"
+        backend = self._options.backend
+
+        # "temp emulation" means: create a *real* table in a chosen database/schema.
+        use_temp_emulation = temp and self._options.temp_emulation_schema is not None
+        database: Database | None = (
+            self._options.temp_emulation_schema if use_temp_emulation else None
+        )
+        temp_flag = False if use_temp_emulation else temp
+
+        # duckdb profiling setup for local dev
         profile_filename: Path | None = None
         profiling_enabled = False
-        use_temp_schema = temp and self._options.temp_emulation_schema is not None
-        qualified_name = (
-            _qualify_name(self._options.temp_emulation_schema, table_name)
-            if use_temp_schema
-            else _quote_identifier(table_name)
-        )
-        if self._profile_dir is not None:
-            profile_filename = (self._profile_dir / f"ibis_profile_{label}_{step_id}.json").resolve()
+        if backend == "duckdb" and self._profile_dir is not None:
+            profile_filename = (
+                self._profile_dir / f"ibis_profile_{label}_{step_id}.json"
+            ).resolve()
             try:
                 escaped = str(profile_filename).replace("'", "''")
-                self._conn.raw_sql(f"PRAGMA profiling_output='{escaped}'")
-                self._conn.raw_sql("PRAGMA enable_profiling='json'")
+                self._conn.raw_sql(f"SET profiling_output='{escaped}'")
+                self._conn.raw_sql("SET enable_profiling='json'")
+                self._conn.raw_sql("SET profiling_coverage='ALL'")
                 profiling_enabled = True
-            except Exception as exc:  # pragma: no cover - diagnostics only
-                print(f"Warning: Could not enable profiling for {label}: {exc}")
-        sql = expr.compile().strip().rstrip(";")
-        if use_temp_schema:
-            create_sql = f"CREATE TABLE {qualified_name} AS {sql}"
-        else:
-            temp_kw = "TEMP " if temp else ""
-            create_sql = f"CREATE {temp_kw}TABLE {qualified_name} AS {sql}"
+            except Exception as e:
+                print(f"Warning: could not enable DuckDB profiling for {label}: {e}")
+
         try:
-            self._conn.raw_sql(create_sql)
-        except Exception as exc:
-            print(f"Error materializing {label}: {exc}")
-            raise
-        else:
+            self._conn.create_table(
+                table_name,
+                obj=expr,
+                database=database,
+                temp=temp_flag,
+                overwrite=True,
+            )
             if self._options.capture_sql:
-                self._captured_sql.append((table_name, create_sql))
+                self._captured_sql.append((table_name, self._conn.compile(expr)))
         finally:
             if profiling_enabled:
                 try:
                     self._conn.raw_sql("PRAGMA disable_profiling")
                 except Exception:
-                    pass
+                    print(f"Warning: could not disable DuckDB profiling for {label}")
+
         if profiling_enabled and profile_filename is not None:
-            print(f" [Profile Captured]: {profile_filename} (Table: {table_name})")
+            print(f"[Profile Captured]: {profile_filename} (Table: {table_name})")
+
         if analyze:
+            qualified = _qualify(database, table_name)
             try:
-                self._conn.raw_sql(f"ANALYZE {qualified_name}")
+                if backend in ("postgres", "duckdb"):
+                    self._conn.raw_sql(f"ANALYZE {qualified}")
+                elif backend == "databricks":
+                    self._conn.raw_sql(f"ANALYZE TABLE {qualified} COMPUTE STATISTICS")
             except Exception:
-                pass
+                print(f"Warning: could not analyze table {qualified}")
+
         def _drop():
             try:
-                if use_temp_schema:
-                    self._conn.raw_sql(f"DROP TABLE IF EXISTS {qualified_name}")
-                else:
-                    self._conn.drop_table(table_name)
+                self._conn.drop_table(table_name, database=database, force=True)
             except Exception:
-                try:
-                    self._conn.raw_sql(f"DROP TABLE IF EXISTS {qualified_name}")
-                except Exception:
-                    pass
+                print(f"Warning: could not drop table {table_name} in {database}")
+
         self.register_cleanup(_drop)
-        if use_temp_schema:
-            return self._table(self._options.temp_emulation_schema, table_name)
-        return self._conn.table(table_name)
+        return _table(self._conn, database, table_name)
 
     @property
     def codesets(self) -> ir.Table:
@@ -331,21 +344,6 @@ def _compile_single_codeset(
     return include_expr.mutate(codeset_id=codeset_literal)[["codeset_id", "concept_id"]]
 
 
-def _table(conn: ibis.BaseBackend, schema: Optional[str], name: str) -> ir.Table:
-    """Standalone version of _table for use in compile_codesets."""
-    if schema:
-        try:
-            return conn.table(name, database=schema)
-        except Exception:
-            try:
-                return conn.table(name, schema=schema)
-            except Exception:
-                pass
-
-    qualified_name = _qualify_name(schema, name)
-    return conn.sql(f"SELECT * FROM {qualified_name}")
-
-
 def _ids_memtable(ids: list[int]) -> Optional[ir.Table]:
     if not ids:
         return None
@@ -392,7 +390,9 @@ def _mapped_concepts(
     )
 
     return (
-        sources.join(valid_relationships, sources.concept_id == valid_relationships.concept_id_2)
+        sources.join(
+            valid_relationships, sources.concept_id == valid_relationships.concept_id_2
+        )
         .select(valid_relationships.concept_id_1.cast("int64").name("concept_id"))
         .distinct()
     )
@@ -410,63 +410,48 @@ def _materialize_codesets(
 ) -> CodesetResource:
     name = f"_codesets_{uuid.uuid4().hex}"
     if options.temp_emulation_schema:
-        # FIX: Use _qualify_name to handle "catalog.schema" correctly
-        qualified = _qualify_name(options.temp_emulation_schema, name)
-        conn.raw_sql(f"CREATE TABLE {qualified} AS {expr.compile()}")
+        database: Database = options.temp_emulation_schema
+        conn.create_table(
+            name,
+            obj=expr,
+            database=database,
+            temp=False,
+            overwrite=True,
+        )
+        table = _table(conn, database, name)
 
-        # When retrieving the table object, we try to use the Ibis table method
-        # If that fails due to the catalog issue, we fallback to SQL selection
-        try:
-            table = _table(conn, options.temp_emulation_schema, name)
-        except Exception:
-            # Absolute fallback if _table's Ibis logic fails to attach to the new table
-            table = conn.sql(f"SELECT * FROM {qualified}")
-
-        drop_sql = f"DROP TABLE IF EXISTS {qualified}"
+        def _drop():
+            try:
+                conn.drop_table(name, database=database, force=True)
+            except Exception:
+                print(f"Warning: could not drop codeset table {name} in {database}")
     else:
-        conn.create_table(name, expr, temp=True, overwrite=True)
-        table = conn.table(name)
-        drop_sql = f'DROP TABLE IF EXISTS "{name}"'
+        conn.create_table(
+            name,
+            obj=expr,
+            temp=True,
+            overwrite=True,
+        )
+        table = _table(conn, None, name)
 
-    def _drop():
-        try:
-            conn.raw_sql(drop_sql)
-        except Exception:
-            pass
+        def _drop():
+            try:
+                conn.drop_table(name, force=True)
+            except Exception:
+                print(f"Warning: could not drop codeset temp table {name}")
 
     resource = CodesetResource(table=table, _dropper=_drop)
-    weakref.finalize(resource.table, resource.cleanup)
+    weakref.finalize(resource, resource.cleanup)
     return resource
-
-
-def _quote_identifier(identifier: str) -> str:
-    if identifier.startswith('"') and identifier.endswith('"'):
-        return identifier
-    escaped = identifier.replace('"', '""')
-    return f'"{escaped}"'
-
-def _qualify_name(schema: Optional[str], name: str) -> str:
-    """
-    Constructs a fully qualified SQL identifier (e.g. "catalog"."schema"."table").
-    Handles splitting schema strings that contain dots.
-    """
-    quoted_name = _quote_identifier(name)
-    if not schema:
-        return quoted_name
-
-    parts = schema.split(".")
-    quoted_schema_parts = [_quote_identifier(p) for p in parts]
-    # Rejoin catalog/schema parts with the table name
-    return ".".join(quoted_schema_parts + [quoted_name])
-
 
 def _union_distinct(tables: Iterable[Optional[ir.Table]]) -> Optional[ir.Table]:
     valid_tables = [t for t in tables if t is not None]
     if not valid_tables:
         return None
 
-    return reduce(lambda left, right: left.union(right), valid_tables[1:], valid_tables[0]).distinct()
-
+    return reduce(
+        lambda left, right: left.union(right, distinct=True), valid_tables[1:], valid_tables[0]
+    )
 
 def _union_all(tables: list[ir.Table]) -> ir.Table:
     return reduce(lambda left, right: left.union(right), tables[1:], tables[0])

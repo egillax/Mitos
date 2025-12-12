@@ -165,7 +165,7 @@ def profile_expression(
                 "plan_lines": 0,
                 "row_count": 0,
             }
-        sql = events.compile().rstrip(";")
+        sql = conn.compile(events).rstrip(";")
         sql_chars = len(sql)
         if profile_path is not None:
             profile_ibis_sql(conn, sql, profile_path)

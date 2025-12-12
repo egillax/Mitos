@@ -72,15 +72,17 @@ def apply_censoring(events: ir.Table, criteria_list: list[Criteria], ctx: BuildC
         (events.person_id == censor_events.person_id) & (censor_events.censor_start >= events.start_date),
         how="left",
     )
-    min_censor = joined.group_by(events.event_id).aggregate(censor_date=censor_events.censor_start.min())
+    min_censor = joined.group_by(joined.event_id).aggregate(censor_date=censor_events.censor_start.min())
+    event_columns = events.columns
     events = events.left_join(min_censor, events.event_id == min_censor.event_id)
+    events = events.select(*event_columns, min_censor.censor_date)
     events = events.mutate(
         end_date=ibis.ifelse(
             events.censor_date.notnull() & (events.censor_date < events.end_date),
             events.censor_date,
             events.end_date,
         )
-    ).drop("censor_date")
+    ).select(*event_columns)
     return events
 
 

@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
             if events is None:
                 print("No primary events were generated.")  # noqa: T201
                 return 0
-            print(events.compile())  # noqa: T201
+            print(conn.compile(events))  # noqa: T201
         else:
             df = build_primary_events_polars(cohort_expression, context)
             if df.is_empty():

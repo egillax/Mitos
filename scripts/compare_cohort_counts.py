@@ -291,6 +291,7 @@ def _split_sql_statements(sql_script: str) -> list[str]:
 def run_python_pipeline(
     con: IbisConnection,
     cfg: AnyProfile,
+
 ) -> tuple[str, int, dict[str, float], list[dict]]:
     expression = CohortExpression.model_validate_json(cfg.json_path.read_text())
 
@@ -299,6 +300,7 @@ def run_python_pipeline(
         vocabulary_schema=cfg.vocab_schema,
         temp_emulation_schema=cfg.temp_schema,
         capture_sql=cfg.capture_stages,
+        backend=cfg.backend,
     )
 
     compile_start = time.perf_counter()
@@ -317,21 +319,23 @@ def run_python_pipeline(
             raise RuntimeError("Cohort expression produced no primary events.")
 
         compile_sql_start = time.perf_counter()
-        sql = events.compile()
+        sql = con.compile(events)
         compile_sql_ms = (time.perf_counter() - compile_sql_start) * 1000
 
-        count_sql = wrap_count_query(str(sql))
         count_start = time.perf_counter()
-
-        pl_df = con.sql(count_sql).to_polars()
-        count = int(pl_df.item(0, 0))
+        count = int(events.count().execute())
 
         final_exec_ms = (time.perf_counter() - count_start) * 1000
 
         if cfg.capture_stages:
             for idx, (table_name, statement) in enumerate(ctx.captured_sql(), start=1):
-                c_df = con.sql(f"SELECT COUNT(*) FROM {table_name}").to_polars()
-                row_count = int(c_df.item(0, 0))
+                stage_db = cfg.temp_schema
+                stage_tbl = (
+                    con.table(table_name, database=stage_db)
+                    if stage_db
+                    else con.table(table_name)
+                )
+                row_count = int(stage_tbl.count().execute())
                 stage_details.append(
                     {
                         "index": idx,
@@ -461,8 +465,17 @@ def execute_circe_sql(
 
     count_start = time.perf_counter()
     count_query = f"SELECT COUNT(*) FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}"
-    pl_df = con.sql(count_query).to_polars()
-    row_count = int(pl_df.item(0, 0))
+    target_db = cfg.result_schema or cfg.cdm_schema
+    cohort_tbl = (
+        con.table(cfg.cohort_table, database=target_db)
+        if target_db
+        else con.table(cfg.cohort_table)
+    )
+    row_count = int(
+        cohort_tbl.filter(cohort_tbl.cohort_definition_id == cfg.cohort_id)
+        .count()
+        .execute()
+    )
     count_ms = (time.perf_counter() - count_start) * 1000
 
     try:

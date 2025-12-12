@@ -380,7 +380,10 @@ def _attach_count_columns(
         domain_table[source_column].name(count_column_name),
     )
     augmented = events.join(lookup, events.event_id == lookup._corr_join_key, how="left")
-    return augmented.drop("_corr_join_key")
+    base_columns = events.columns
+    projection = [augmented[name] for name in base_columns if name in augmented.columns]
+    projection.append(augmented[count_column_name])
+    return augmented.select(*projection)
 
 
 def _requires_observation_period_end_alignment(correlated: CorrelatedCriteria) -> bool:

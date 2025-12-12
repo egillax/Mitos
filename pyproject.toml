@@ -37,6 +37,7 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
+    "ipdb>=0.13.13",
     "ipython>=8.37.0",
     "pytest>=9.0.1",
 ]

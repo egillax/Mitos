@@ -46,7 +46,7 @@ def main():
     if events is None:
         raise SystemExit("Cohort expression did not contain any primary criteria.")
 
-    sql = str(events.compile())
+    sql = str(conn.compile(events))
     if args.output:
         Path(args.output).write_text(sql)
     else:

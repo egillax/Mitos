@@ -57,6 +57,7 @@ def build_primary_events(expression: CohortExpression, ctx: BuildContext):
     events = _assign_primary_event_ids(events)
     if _should_limit(primary.primary_limit):
         events = _apply_result_limit(events, primary.primary_limit)
+
     events = ctx.materialize(events, label="primary_events", analyze=True)
 
     # Short-circuit the remainder of the pipeline when no primary events exist.
@@ -131,16 +132,22 @@ def _assign_primary_event_ids(events):
     )
 
 
-def _apply_result_limit(events, limit):
+def _apply_result_limit(events: ir.Table, limit) -> ir.Table:
     if not limit or (limit.type or "ALL").lower() == "all":
         return events
+
     order_by = [events.start_date]
     if "event_id" in events.columns:
         order_by.append(events.event_id)
-    window = ibis.window(group_by=events.person_id, order_by=order_by)
-    ranked = events.mutate(_result_row=ibis.row_number().over(window))
-    limited = ranked.filter(ranked._result_row == 0)
-    return limited.drop("_result_row")
+
+    w = ibis.window(group_by=events.person_id, order_by=order_by)
+
+    helper = "__mitos_rn__"
+
+    ranked = events.mutate(**{helper: ibis.row_number().over(w)})
+    limited = ranked.filter(ranked[helper] == 0)
+
+    return limited.select([limited[c] for c in events.columns])
 
 
 def _drop_aux_columns(events: ir.Table) -> ir.Table:
@@ -158,5 +165,7 @@ def _drop_aux_columns(events: ir.Table) -> ir.Table:
     if drop_cols:
         events = events.drop(*drop_cols)
     return events
+
+
 def _should_limit(limit) -> bool:
     return bool(limit and (limit.type or "all").lower() != "all")
