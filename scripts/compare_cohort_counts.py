@@ -280,6 +280,25 @@ def wrap_count_query(sql: str) -> str:
     trimmed = sql.strip().rstrip(";")
     return f"SELECT COUNT(*) AS row_count FROM ({trimmed}) as cohort_rows"
 
+def _exec_raw(con: IbisConnection, sql: str) -> None:
+    """
+    Execute a statement via `raw_sql` and eagerly consume results.
+
+    Databricks SQL can behave asynchronously; consuming results and closing the cursor
+    ensures completion and avoids resource leaks.
+    """
+    cur = con.raw_sql(sql)
+    try:
+        try:
+            cur.fetchall()
+        except Exception:
+            pass
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
 
 def _split_sql_statements(sql_script: str) -> list[str]:
     statements: list[str] = []
@@ -465,7 +484,8 @@ def execute_circe_sql(
 
     if cfg.result_schema:
         try:
-            con.raw_sql(
+            _exec_raw(
+                con,
                 f"CREATE SCHEMA IF NOT EXISTS {'.'.join(quote_ident_for_backend(p, cfg.backend) for p in cfg.result_schema.split('.'))}"
             )
         except Exception as e:
@@ -476,7 +496,7 @@ def execute_circe_sql(
                 ) from e
 
     try:
-        con.raw_sql(f"""
+        _exec_raw(con, f"""
             CREATE TABLE IF NOT EXISTS {qualified_table} (
                 cohort_definition_id BIGINT, subject_id BIGINT, 
                 cohort_start_date DATE, cohort_end_date DATE
@@ -495,7 +515,7 @@ def execute_circe_sql(
     for stmt in statements:
         if stmt.strip():
             try:
-                con.raw_sql(stmt)
+                _exec_raw(con, stmt)
             except Exception as e:
                 print(f"SQL Fail:\n{stmt[:100]}...", file=sys.stderr)
                 raise e
@@ -517,7 +537,8 @@ def execute_circe_sql(
     count_ms = (time.perf_counter() - count_start) * 1000
 
     try:
-        con.raw_sql(
+        _exec_raw(
+            con,
             f"DELETE FROM {qualified_table} WHERE cohort_definition_id = {cfg.cohort_id}"
         )
     except Exception:
