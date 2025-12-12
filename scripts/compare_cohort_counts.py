@@ -486,6 +486,17 @@ def generate_circe_sql_via_r(
     elapsed = (time.perf_counter() - start) * 1000
     if result.returncode != 0:
         raise RuntimeError(f"Circe R Error:\n{result.stderr or result.stdout}")
+    stdout = (result.stdout or "").strip()
+    if not stdout:
+        stderr = (result.stderr or "").strip()
+        hint = (
+            "Circe SQL generation returned empty output.\n"
+            "This usually means the R script ran but produced no SQL (e.g. missing R packages, "
+            "failed JSON parsing, or a silent error/warning).\n"
+            "Try running the R command directly and ensure `CirceR` and `SqlRender` are installed.\n"
+        )
+        details = f"stderr:\n{stderr}\n" if stderr else "stderr: <empty>\n"
+        raise RuntimeError(hint + details)
     return result.stdout, elapsed
 
 
