@@ -217,9 +217,10 @@ def resolve_config(args: argparse.Namespace) -> AnyProfile:
     if cli_args.get("cdm_db"):
         cli_args["database"] = cli_args.pop("cdm_db")
 
+    if cli_args.pop("no_cleanup_circe", False):
+        cli_args["cleanup_circe"] = False
+
     merged_data = {**config_dict, **cli_args}
-    if args.no_cleanup_circe:
-        merged_data["cleanup_circe"] = False
 
     try:
         validator = TypeAdapter(AnyProfile)
