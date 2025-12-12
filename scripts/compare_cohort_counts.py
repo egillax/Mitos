@@ -109,7 +109,7 @@ class DatabricksProfile(BaseProfile):
     access_token: SecretStr
     port: int | None = None
     catalog: str | None = None
-    schema: str | None = None
+    connect_schema: str | None = Field(default=None, alias="schema")
     http_headers: dict[str, str] | None = None
     session_configuration: dict[str, str] | None = None
 
@@ -154,7 +154,7 @@ class DatabricksProfile(BaseProfile):
             params["session_configuration"] = self.session_configuration
         # Allow explicit override, otherwise use derived defaults.
         catalog = self.catalog or default_catalog
-        schema = self.schema or default_schema
+        schema = self.connect_schema or default_schema
         if catalog is not None:
             params["catalog"] = catalog
         if schema is not None:

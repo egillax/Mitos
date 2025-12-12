@@ -204,6 +204,59 @@ class BuildContext:
             return expr
         return self.materialize(expr, label=label, temp=temp, analyze=analyze)
 
+    def write_cohort_table(
+        self,
+        events: ir.Table,
+        *,
+        table_name: str | None = None,
+        database: Database | None = None,
+        overwrite: bool = True,
+        append: bool = False,
+    ) -> ir.Table:
+        """
+        Persist cohort rows to a results table.
+
+        Output schema matches OHDSI cohort tables:
+          (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+        """
+        target_table = table_name or self._options.target_table
+        if not target_table:
+            raise ValueError("target_table must be set (argument or CohortBuildOptions.target_table)")
+        target_db = database if database is not None else self._options.result_schema
+        if target_db is None:
+            raise ValueError("result_schema must be set (argument or CohortBuildOptions.result_schema)")
+
+        cohort_id = self._options.cohort_id
+        cohort_id_expr = (
+            ibis.literal(int(cohort_id), type="int64")
+            if cohort_id is not None
+            else ibis.null().cast("int64")
+        )
+
+        result = events.select(
+            cohort_id_expr.name("cohort_definition_id"),
+            events.person_id.cast("int64").name("subject_id"),
+            events.start_date.cast("date").name("cohort_start_date"),
+            events.end_date.cast("date").name("cohort_end_date"),
+        )
+
+        obj = result
+        if append:
+            try:
+                existing = _table(self._conn, target_db, target_table)
+                obj = existing.union(result, distinct=False)
+            except Exception:
+                obj = result
+
+        self._conn.create_table(
+            target_table,
+            obj=obj,
+            database=target_db,
+            temp=False,
+            overwrite=overwrite,
+        )
+        return _table(self._conn, target_db, target_table)
+
     @property
     def codesets(self) -> ir.Table:
         return self._codesets

@@ -15,6 +15,8 @@ from mitos.build_context import (
     CodesetResource,
 )
 
+import ibis
+
 
 class FakeTable:
     def __init__(self, value: str):
@@ -424,3 +426,28 @@ def test_union_helpers_handle_none_and_distinct_flags():
     combined_all = _union_all([a, b, c])
     assert isinstance(combined_all, UnionRecorder)
     assert any(call[2] is False for call in combined_all.calls)
+
+
+def test_write_cohort_table_creates_result_table_in_schema():
+    events = ibis.memtable(
+        [{"person_id": 1, "start_date": "2020-01-01", "end_date": "2020-01-02"}],
+        schema={"person_id": "int64", "start_date": "timestamp", "end_date": "timestamp"},
+    )
+    options = CohortBuildOptions(
+        result_schema="scratch.schema",
+        target_table="cohort_table",
+        cohort_id=123,
+    )
+    conn = DummyBackend(table_behavior="database")
+    ctx = BuildContext(conn, options, FakeTable("codesets"))
+
+    tbl = ctx.write_cohort_table(events)
+    assert isinstance(tbl, FakeTable)
+
+    create_calls = [c for c in conn.calls if c[0] == "create_table"]
+    assert len(create_calls) == 1
+    _, name, obj, database, temp, overwrite = create_calls[0]
+    assert name == "cohort_table"
+    assert database == "scratch.schema"
+    assert temp is False
+    assert overwrite is True
