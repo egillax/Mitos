@@ -3,12 +3,20 @@ import warnings
 try:
     from ibis.backends.databricks import Backend as DatabricksBackend
 
-    def _no_op_post_connect(self, *args, **kwargs):
-        # Intentionally do nothing to skip volume creation.
-        # This effectively forces "read-only" mode regarding memtables
-        pass
+    _orig_post_connect = DatabricksBackend._post_connect
 
-    DatabricksBackend._post_connect = _no_op_post_connect
+    def _post_connect_best_effort(self, *, memtable_volume: str) -> None:
+        try:
+            _orig_post_connect(self, memtable_volume=memtable_volume)
+        except Exception as e:
+            warnings.warn(
+                "Mitos: Databricks memtable volume creation failed; continuing without it. "
+                "If you use `ibis.memtable` (directly or indirectly), execution may fail unless "
+                "a writable UC volume exists at the expected location. "
+                f"Original error: {e}"
+            )
+
+    DatabricksBackend._post_connect = _post_connect_best_effort
 
 except ImportError:
     pass

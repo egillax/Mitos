@@ -11,6 +11,7 @@ import ibis
 import ibis.expr.types as ir
 
 from .concept_set import ConceptSet
+from .ibis_compat import table_from_literal_list
 
 Database = Union[str, Tuple[str, str]]
 
@@ -347,8 +348,7 @@ def _compile_single_codeset(
 def _ids_memtable(ids: list[int]) -> Optional[ir.Table]:
     if not ids:
         return None
-    schema = ibis.schema({"concept_id": "int64"})
-    return ibis.memtable([{"concept_id": i} for i in ids], schema=schema).distinct()
+    return table_from_literal_list(ids, column_name="concept_id", element_type="int64").distinct()
 
 
 def _descendants(
@@ -399,8 +399,11 @@ def _mapped_concepts(
 
 
 def _empty_codeset_table() -> ir.Table:
-    schema = ibis.schema({"codeset_id": "int64", "concept_id": "int64"})
-    return ibis.memtable([], schema=schema)
+    empty_concepts = table_from_literal_list([], column_name="concept_id", element_type="int64")
+    empty_codesets = empty_concepts.mutate(
+        codeset_id=ibis.null().cast("int64"),
+    )
+    return empty_codesets.select("codeset_id", "concept_id")
 
 
 def _materialize_codesets(
